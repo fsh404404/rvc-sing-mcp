@@ -708,6 +708,14 @@ server.tool(
           }
         }
       }
+      // 引擎差异在音域分界附近可能翻转判断：实测 pyin 与 rmvpe 在 245~291Hz 区间差 5~6Hz，
+      // 若中位数正好压在 femaleF0Threshold 两侧，换引擎就会一边不升调、一边自动升调。
+      // 这里只把情况说出来（让人能复核），不擅自改判。
+      if (medianF0 != null && Math.abs(medianF0.hz - FEMALE_F0) <= 8) {
+        const side = medianF0.hz >= FEMALE_F0 ? '不升调' : '自动定调';
+        const boundary = `中位 ${medianF0.hz.toFixed(0)}Hz 距音域分界 ${FEMALE_F0}Hz 仅 ${Math.abs(medianF0.hz - FEMALE_F0).toFixed(0)}Hz，换引擎可能翻转判断，本次按${side}处理`;
+        pitchNote = pitchNote ? `${pitchNote}；${boundary}` : boundary;
+      }
       report(`用目标音色转换（pitch=${usePitch}）`);
       await convertVoice(vocals, converted, usePitch);
       report('混音与响度归一');

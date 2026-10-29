@@ -24,8 +24,21 @@ SING = os.path.dirname(os.path.abspath(__file__))
 PYIN_SR = 22050
 RMVPE_SR = 16000
 
-# rmvpe 的常见入口：版本不同位置不同，从最可能到最不可能试一遍
+# 和 cover.py 一样：真正的包在 sing/rvc_cli/rvc_cli/ 里，
+# 必须把 sing/rvc_cli 放进 sys.path，`import rvc_cli` 才会解析到那个包。
+# 不加这一步，`rvc_cli` 会命中 sing/rvc_cli/ 这个同名目录（它下面没有 rvc.lib），
+# 于是所有候选都报 "No module named 'rvc_cli.rvc.lib'"。
+RVC_CLI_DIR = os.path.join(SING, "rvc_cli")
+if os.path.isdir(RVC_CLI_DIR) and RVC_CLI_DIR not in sys.path:
+    sys.path.insert(0, RVC_CLI_DIR)
+
+# rmvpe 的入口在不同 RVC 包里位置、类名、大小写都不一样：
+#   rvc-cli 1.8.0（实测）→ rvc_cli/rvc/lib/predictors/RMVPE.py，类名 RMVPE0Predictor
+#   其它常见发行版    → rvc/lib/rmvpe.py 或 infer/lib/rmvpe.py，类名 RMVPE
+# 从最可能到最不可能试一遍，全部失败会把这些候选名一起报出来。
 RMVPE_ENTRY_CANDIDATES = [
+    ("rvc_cli.rvc.lib.predictors.RMVPE", "RMVPE0Predictor"),
+    ("rvc_cli.rvc.lib.predictors.rmvpe", "RMVPE"),
     ("rvc_cli.rvc.infer.lib.rmvpe", "RMVPE"),
     ("rvc_cli.rvc.lib.rmvpe", "RMVPE"),
     ("rvc_cli.rmvpe", "RMVPE"),
@@ -86,15 +99,22 @@ def f0_pyin(y, sr):
 
 
 def import_rmvpe():
+    """返回 (类, 模块名, 失败原因列表)。失败原因要带出来：
+    「模块不存在」和「模块在但 import 报错」是两种完全不同的毛病，
+    早先一律报「找不到入口」，把 torch 版本冲突之类的问题也伪装成路径问题。"""
+    failures = []
     for module_name, class_name in RMVPE_ENTRY_CANDIDATES:
         try:
             module = importlib.import_module(module_name)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 —— 记录原因，继续试下一个
+            failures.append("%s: %s" % (module_name, exc))
             continue
         klass = getattr(module, class_name, None)
-        if klass is not None:
-            return klass, module_name
-    return None, None
+        if klass is None:
+            failures.append("%s: 没有 %s 这个类" % (module_name, class_name))
+            continue
+        return klass, module_name, failures
+    return None, None, failures
 
 
 def build_rmvpe(klass, weights, is_half, device):
@@ -118,11 +138,10 @@ def build_rmvpe(klass, weights, is_half, device):
 def preflight_rmvpe():
     """先做便宜的入口/权重检查：这两步失败与「librosa 没装」是两回事，
     混在一起上报会把人带偏（先看到 librosa 报错，会误以为装个 librosa 就好了）。"""
-    klass, module_name = import_rmvpe()
+    klass, module_name, failures = import_rmvpe()
     if klass is None:
-        raise RuntimeError(
-            "找不到 rmvpe 入口（试过 %s）" % " / ".join(m for m, _ in RMVPE_ENTRY_CANDIDATES)
-        )
+        detail = "; ".join(failures[:2]) if failures else "没有候选"
+        raise RuntimeError("找不到 rmvpe 入口（%s）" % detail.replace("\n", " ")[:240])
     weights = next((p for p in RMVPE_WEIGHTS if os.path.exists(p)), None)
     if weights is None:
         raise RuntimeError("找不到 rmvpe.pt（放 sing/model/ 或 sing/rvc_cli/rvc/models/predictors/）")
@@ -140,11 +159,13 @@ def f0_rmvpe(audio, entry):
     is_half = device == "cuda"
     model = build_rmvpe(klass, weights, is_half, device)
 
+    # infer_from_audio 内部直接 torch.from_numpy，必须是连续 float32
+    samples = np.ascontiguousarray(np.asarray(audio, dtype="float32"))
     if device == "cuda":
         with torch.no_grad():
-            f0 = model.infer_from_audio(audio, thred=0.03)
+            f0 = model.infer_from_audio(samples, thred=0.03)
     else:
-        f0 = model.infer_from_audio(audio, thred=0.03)
+        f0 = model.infer_from_audio(samples, thred=0.03)
 
     arr = np.asarray(f0, dtype="float32")
     vals = arr[np.isfinite(arr) & (arr > 0)]

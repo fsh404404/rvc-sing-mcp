@@ -30,8 +30,10 @@ const DEFAULTS = {
   femaleF0Threshold: 200,
   // 自动定调上限（半音）
   maxPitch: 12,
-  // 估调用的 f0 引擎：auto（有 rmvpe 就用，否则 pyin）/ rmvpe / pyin
-  f0Engine: 'auto',
+  // 估调用的 f0 引擎：pyin（默认，与改动前行为一致）/ rmvpe / auto（优先 rmvpe，失败退回 pyin）
+  // 默认留 pyin 是有实测依据的：四首人声对比中 rmvpe 在 245~291Hz 区间系统性偏高 5~6Hz，
+  // 在 200Hz 分界附近可能翻转「男声/女声」判断；耗时两者持平（差 0.3~0.7s）。
+  f0Engine: 'pyin',
   // 估调最多取多少秒（原来的行为是 40 秒）
   f0MaxSeconds: 40,
   // 按歌名记住起唱点的规则文件，相对 <singDir>/

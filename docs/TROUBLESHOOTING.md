@@ -49,7 +49,7 @@ sing\venv\Scripts\python python\cover-timing.py 输入.wav 输出.wav 0 rmvpe
 
 ## 换了估调引擎后音域判断变了
 
-`est_f0.py` 默认 `--engine=auto`：先试 rmvpe（与 `cover.py` 转换阶段同一条 f0 曲线），探测不到就退回 pyin。两套算法对同一段人声的中位数可能差一点点，于是 `pitch` 可能差一个半音 —— 这是引擎差异，不是 bug。
+`est_f0.py` 默认 `--engine=pyin`（与改动前一致）；`rmvpe` / `auto` 是可选项。两套算法对同一段人声的中位数有差异：实测男声区差 0.2~0.5 Hz，女声区 rmvpe 系统性偏高 5~6 Hz。`femaleF0Threshold` 是 200 Hz，所以中位数贴着这条线的歌，换引擎可能翻转「升不升调」的判断。详细数据见 README「定调引擎」一节。
 
 怎么核对：
 

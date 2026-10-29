@@ -8,7 +8,7 @@
   "targetF0": 250,
   "femaleF0Threshold": 200,
   "maxPitch": 12,
-  "f0Engine": "auto",
+  "f0Engine": "pyin",
   "f0MaxSeconds": 40,
   "startOffsetsFile": "start-offsets.json",
   "voiceToolName": "send_voice",

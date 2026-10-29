@@ -291,16 +291,31 @@ CPU 模式下翻唱要几分钟，没有这个很容易被客户端判成卡死�
 - **目标音域法（`targetF0=250`）**：以一首源中位 183 Hz 的歌为例，机械 +12 会顶到假声、丢帧率最高；把中位搬到 ~247 Hz（+5）丢帧与能量都更自然。
 - **混音 `amix:normalize=0`**：`amix` 默认会把总和除以输入路数（−6 dB），成品比源低约 10 dB，前奏听起来像「卡住没声」。新 ffmpeg 用 `normalize=0`，老版本不认该参数时回退到 `volume=2` 补回那 6 dB。
 
-## 定调引擎：为什么估调也走 rmvpe
+## 定调引擎：为什么默认仍是 pyin
 
-`cover.py` 换音色时用 rmvpe 提 f0；如果估调这里另用 `librosa.pyin`，两套算法对同一段人声的中位数可能差一点点，个别歌会因此差一个半音。pyin 本身也慢（CPU 上 40 秒人声要十几秒）。
+`est_f0.py` 支持两套引擎，默认 `pyin`（与改动前完全一致）：
 
-所以 `est_f0.py` 默认 `--engine=auto`：**先试 rmvpe，探测不到入口或权重就自动退回 pyin**，两条路都失败才返回 0（上层当作「估不出来」，按 0 调处理，不阻断出歌）。
+| 引擎 | 说明 |
+|---|---|
+| `pyin` | librosa.pyin，纯 CPU，不加载任何模型。**默认** |
+| `rmvpe` | 复用 `cover.py` 的 rmvpe 权重，与转换阶段同一条 f0 曲线 |
+| `auto` | 先试 rmvpe，探测不到入口或权重就退回 pyin |
 
-- 结果里带 `ENGINE=rmvpe|pyin|none`，`sing_cover` 的返回 JSON 里对应 `sourceF0Engine`；
-- 想固定用哪套：`SING_F0_ENGINE=pyin` 或 `rmvpe`；
-- rmvpe 的入口在不同 RVC 包里位置不一样（`rvc_cli.rvc.infer.lib.rmvpe` / `rvc_cli.rvc.lib.rmvpe` / `infer.lib.rmvpe`…），脚本会依次尝试；构造签名也按常见几种适配；
-- 换引擎后**音域判断可能变化**（差 1 个半音）。对同一首歌两种引擎各跑一次、对比 `sourceMedianF0`，确认没有意外跳档再上生产。
+本机实测（RTX 5060 Laptop，四段 50 秒人声、各取前 40 秒）：
+
+| 素材 | pyin | rmvpe | 差 | 耗时 pyin / rmvpe |
+|---|---|---|---|---|
+| 男声 A | 165.7 Hz | 165.5 Hz | −0.2 | 5.3 / 4.9 s |
+| 男声 B | 197.0 Hz | 196.5 Hz | −0.5 | 4.8 / 4.5 s |
+| 女声 A | 245.4 Hz | 250.4 Hz | +5.0 | 5.6 / 5.3 s |
+| 女声 B | 285.2 Hz | 291.3 Hz | +6.1 | 5.1 / 4.6 s |
+
+结论：**耗时基本持平**（rmvpe 快 0.3~0.7 s，但要加载 181 MB 权重），而 rmvpe 在女声区间系统性偏高 5~6 Hz。`femaleF0Threshold` 默认 200 Hz，男声 B 的 197.0 / 196.5 就压在这条线附近。所以默认保持 pyin —— 不拿一个未定性的偏差去换 0.4 秒。
+
+- 结果里带 `ENGINE=`，`sing_cover` 返回里是 `sourceF0Engine`；
+- 想对比：`SING_F0_ENGINE=rmvpe` 跑一次、`=pyin` 再跑一次，只看 `sourceMedianF0` 与 `pitch`；
+- 中位数落在 `femaleF0Threshold ±8 Hz` 时，`pitchNote` 会额外提示「换引擎可能翻转判断」，并写出本次判定的方向；
+- rmvpe 的入口在不同 RVC 包里位置和类名都不一样（rvc-cli 1.8.0 是 `rvc_cli/rvc/lib/predictors/RMVPE.py`、类名 `RMVPE0Predictor`；并且必须把 `sing/rvc_cli` 放进 `sys.path` 才能 import 到）。脚本按候选表依次探测，失败原因会带进 `REASON=`。
 
 ## 已知问题
 
