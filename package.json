@@ -10,6 +10,7 @@
   "files": [
     "src",
     "python",
+    "scripts",
     "docs",
     "examples",
     "config.example.json",
@@ -19,7 +20,7 @@
   "scripts": {
     "start": "node src/mcp-sing.js",
     "probe": "node scripts/probe.mjs",
-    "check": "node --check src/mcp-sing.js && node --check src/config.js"
+    "check": "node --check src/mcp-sing.js && node --check src/config.js && node --check scripts/probe.mjs"
   },
   "keywords": [
     "mcp",
@@ -33,6 +34,14 @@
   "engines": {
     "node": ">=20"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fsh404404/rvc-sing-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/fsh404404/rvc-sing-mcp/issues"
+  },
+  "homepage": "https://github.com/fsh404404/rvc-sing-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.4.3"

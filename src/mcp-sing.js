@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // 唱歌 / AI 翻唱 MCP server（stdio）。
 //
 // 链路的完整形态：
@@ -44,6 +45,12 @@ const TARGET_F0 = CFG.targetF0;
 const FEMALE_F0 = CFG.femaleF0Threshold;
 const MAX_PITCH = CFG.maxPitch;
 const VOICE_TOOL = CFG.voiceToolName;
+const MAX_CONCURRENT = CFG.maxConcurrent;
+const KEEP_WORK = CFG.keepWork;
+const KEEP_OUTPUT = CFG.keepOutput;
+const CONTENTVEC_CANDIDATES = CFG.contentvecCandidates;
+const RMVPE_MODEL = CFG.rmvpeModel;
+const RVC_RUNTIME_DIR = CFG.rvcRuntimeDir;
 
 // demucs 权重一旦缓存到本地，huggingface_hub 每次启动仍会联网校验版本：
 // 网络不好时要么白等几十秒，要么直接失败。缓存存在就强制离线，只用本地权重。
@@ -86,6 +93,44 @@ function slugify(text) {
 
 function stamp() {
   return new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+}
+
+/** 能不能真的跑起来。
+ *  [坑] 早先用 fs.existsSync(ffmpegPath) 判断就绪：PATH 兜底时 ffmpegPath 只是
+ *  裸名字 "ffmpeg.exe"，existsSync 按 cwd 解析必然 false —— 明明能用却报缺失。
+ *  这里改成真的 spawn 一次，退出码非零但有输出也算可用（-version 类命令就这样）。 */
+async function canRun(file, args = ['--version']) {
+  try {
+    await exec(file, args, { timeout: 30_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+    return { ok: true };
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return { ok: false, detail: '找不到可执行文件（既不在配置里，也不在 PATH 上）' };
+    }
+    const text = `${String(error?.stdout ?? '')}${String(error?.stderr ?? '')}`.trim();
+    if (text) return { ok: true, detail: text.split(/\r?\n/)[0].slice(0, 80) };
+    return { ok: false, detail: String(error?.message ?? error).slice(0, 160) };
+  }
+}
+
+/** 目录存在且真的能写。只判 existsSync 会漏掉「目录在但没权限」这种最常见的情况。 */
+function canWriteDir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = path.join(dir, `.write-probe-${process.pid}-${Date.now()}`);
+    fs.writeFileSync(probe, 'ok');
+    fs.unlinkSync(probe);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, detail: String(error?.message ?? error).slice(0, 160) };
+  }
+}
+
+function firstExistingPath(candidates) {
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return candidates[0] ?? '';
 }
 
 /** 输出目录里不重名的目标路径。 */
@@ -167,6 +212,9 @@ async function searchBilibili(query, limit) {
         title: stripTags(item.title),
         url: `https://www.bilibili.com/video/${item.bvid}`,
         duration: parseClock(item.duration),
+        // 播放量是判断「哪一版才是大众认知的那首」最省事的信号：
+        // 搜索结果里混着翻唱、切片、直播回放，光看标题区分不出来
+        play: Number.isFinite(Number(item.play)) ? Number(item.play) : undefined,
         uploader: item.author ? stripTags(item.author) : undefined,
         source: 'bilibili',
       }))
@@ -210,14 +258,16 @@ async function searchSongs(query, limit = 5) {
   throw new Error(`搜索失败：${errors.join(' / ') || '没有结果'}`);
 }
 
-/** 下载最佳音轨并转成 mp3（只保留音频，不带视频）。 */
+/** 下载最佳音轨并转成 mp3（只保留音频，不带视频）。
+ *  [坑] --ffmpeg-location 只在拿到绝对路径时传。PATH 兜底时 FFMPEG 只是裸名字，
+ *  path.dirname('ffmpeg.exe') 得到 "."，等于骗 yt-dlp 去当前目录找 ffmpeg。 */
 async function downloadAudio(url, outBase) {
   await fsp.mkdir(WORK_DIR, { recursive: true });
   await run(YTDLP, [
     '--no-warnings', '--ignore-errors',
     '-f', 'bestaudio/best',
     '-x', '--audio-format', 'mp3', '--audio-quality', '5',
-    '--ffmpeg-location', path.dirname(FFMPEG),
+    ...(path.isAbsolute(FFMPEG) ? ['--ffmpeg-location', path.dirname(FFMPEG)] : []),
     '-o', `${outBase}.%(ext)s`,
     '--no-playlist',
     url,
@@ -356,17 +406,43 @@ async function probeDuration(file) {
   }
 }
 
-/** 环境自检：每个环节缺什么一眼能看到。 */
-async function readiness() {
+/** 环境自检：每个环节缺什么一眼能看到。
+ *  两件事必须做到，否则「缺什么一次列全」就是空话：
+ *   1. 判定方式要和真正执行时一致（PATH 上的可执行文件用 spawn 判，不用 existsSync）；
+ *   2. 覆盖要和对 ai 模式的准入门槛完全重合（不然 probe 全绿、sing_cover 却缺 contentvec）。
+ *  自检本身要 spawn 两次可执行文件 + 两次 python，约 2~4s；每次点歌都跑一遍太浪费，
+ *  所以结果缓存 30 秒，sing_probe 显式要求 fresh 时不走缓存。 */
+let readinessCache = null;
+
+async function readiness({ fresh = false } = {}) {
+  if (!fresh && readinessCache && Date.now() - readinessCache.at < 30_000) return readinessCache.value;
   const checks = {
-    ytdlp: { ok: fs.existsSync(YTDLP), path: YTDLP },
-    ffmpeg: { ok: fs.existsSync(FFMPEG), path: FFMPEG },
+    ytdlp: { ...(await canRun(YTDLP, ['--version'])), path: YTDLP },
+    ffmpeg: { ...(await canRun(FFMPEG, ['-version'])), path: FFMPEG },
     venv: { ok: fs.existsSync(VENV_PY), path: VENV_PY },
     torch: { ok: false, detail: '未检测' },
     demucs: { ok: false, detail: '未检测' },
-    rvc: { ok: fs.existsSync(RVC_DIR), path: RVC_DIR },
+    rvc: {
+      ok: fs.existsSync(path.join(RVC_DIR, 'rvc')) && fs.existsSync(path.join(RVC_DIR, 'rvc_cli')),
+      path: RVC_DIR,
+      detail: fs.existsSync(RVC_DIR) ? '需要同时有 rvc/ 与 rvc_cli/ 两个子目录' : '目录不存在',
+    },
     coverScript: { ok: fs.existsSync(COVER_SCRIPT), path: COVER_SCRIPT },
+    f0Script: { ok: fs.existsSync(F0_SCRIPT), path: F0_SCRIPT },
     voiceModel: { ok: fs.existsSync(AI_VOICE_MODEL), path: AI_VOICE_MODEL },
+    contentvec: { ok: fs.existsSync(firstExistingPath(CONTENTVEC_CANDIDATES)), path: firstExistingPath(CONTENTVEC_CANDIDATES) },
+    rmvpe: {
+      ok: fs.existsSync(RMVPE_MODEL) || fs.existsSync(path.join(RVC_DIR, 'rvc', 'models', 'predictors', 'rmvpe.pt')),
+      path: RMVPE_MODEL,
+      detail: '放 sing/model/rmvpe.pt，首次运行会自动复制进 rvc_cli',
+    },
+    rvcRuntime: { ok: fs.existsSync(RVC_RUNTIME_DIR), path: RVC_RUNTIME_DIR },
+    index: { ok: true, detail: '未检测' },
+    startOffsetsFile: {
+      ok: fs.existsSync(START_OFFSETS_FILE),
+      path: START_OFFSETS_FILE,
+      detail: '可选的起唱点规则文件（不存在不影响出歌，只是每条都要自己估前奏）',
+    },
   };
   if (checks.venv.ok) {
     try {
@@ -382,9 +458,108 @@ async function readiness() {
       checks.demucs = { ok: false, detail: '未安装（pip install demucs）' };
     }
   }
-  checks.outputDir = { ok: fs.existsSync(CFG.outputDir), path: CFG.outputDir };
+  try {
+    const modelDir = path.dirname(AI_VOICE_MODEL);
+    const idx = fs.existsSync(modelDir) ? fs.readdirSync(modelDir).filter((f) => f.toLowerCase().endsWith('.index')) : [];
+    checks.index = idx.length
+      ? { ok: true, detail: `${idx.length} 个索引，将自动以 index_rate=0.75 启用：${idx.slice(0, 3).join(', ')}` }
+      : { ok: true, detail: '无 faiss 索引（纯模型推理，音色相似度略低）' };
+  } catch {
+    checks.index = { ok: true, detail: '模型目录读不到，跳过' };
+  }
+  checks.outputDir = { ...canWriteDir(CFG.outputDir), path: CFG.outputDir };
   checks.device = { value: DEVICE };
+  // ai 模式的准入门槛：与 sing_cover 的前置检查共用同一份清单，避免两处判据漂移
+  checks.aiMissing = AI_REQUIRED.filter(([key]) => checks[key] && checks[key].ok === false)
+    .map(([, label]) => label);
+  checks.aiReady = checks.aiMissing.length === 0;
+  checks.originalReady = checks.ytdlp.ok && checks.ffmpeg.ok && checks.outputDir.ok;
+  readinessCache = { at: Date.now(), value: checks };
   return checks;
+}
+
+/** ai 模式真正需要的东西：键 → 给人看的说法。 */
+const AI_REQUIRED = [
+  ['venv', 'Python venv'],
+  ['torch', 'PyTorch'],
+  ['demucs', 'demucs（人声分离）'],
+  ['rvc', 'RVC 推理代码'],
+  ['coverScript', 'RVC 驱动脚本 sing/cover.py'],
+  ['voiceModel', '音色模型 .pth'],
+  ['contentvec', 'contentvec 特征模型'],
+  ['rmvpe', 'rmvpe 音高模型'],
+];
+
+/** 清理：work 下只留最近 N 个任务目录、output 下只留最近 N 个成品。
+ *  机器人是真 7x24 跑的，一首歌的中间产物 50~150 MB，不清理一个月就是几百 GB。 */
+function pruneWork(keep = KEEP_WORK) {
+  if (!keep) return { removed: 0 };
+  try {
+    const dirs = fs.readdirSync(WORK_DIR)
+      .map((name) => path.join(WORK_DIR, name))
+      .filter((p) => {
+        try { return fs.statSync(p).isDirectory(); } catch { return false; }
+      })
+      .map((p) => ({ p, t: fs.statSync(p).mtimeMs }))
+      .sort((a, b) => b.t - a.t);
+    let removed = 0;
+    for (const item of dirs.slice(keep)) {
+      try { fs.rmSync(item.p, { recursive: true, force: true }); removed += 1; } catch { /* 占用中就下次 */ }
+    }
+    return { removed };
+  } catch {
+    return { removed: 0 };
+  }
+}
+
+function pruneOutput(keep = KEEP_OUTPUT) {
+  if (!keep) return { removed: 0 };
+  try {
+    const files = fs.readdirSync(CFG.outputDir)
+      .filter((name) => name.startsWith('sing-') && /\.(mp3|wav|m4a)$/i.test(name))
+      .map((name) => ({ p: path.join(CFG.outputDir, name), t: fs.statSync(path.join(CFG.outputDir, name)).mtimeMs }))
+      .sort((a, b) => b.t - a.t);
+    let removed = 0;
+    for (const item of files.slice(keep)) {
+      try { fs.unlinkSync(item.p); removed += 1; } catch { /* 正在被读就跳过 */ }
+    }
+    return { removed };
+  } catch {
+    return { removed: 0 };
+  }
+}
+
+/** 并发闸门：RVC 单次要吃几个 GB 显存，两个群同时点歌就是 CUDA OOM。 */
+let activeJobs = 0;
+const jobWaiters = [];
+async function acquireSlot() {
+  if (activeJobs < MAX_CONCURRENT) {
+    activeJobs += 1;
+    return;
+  }
+  await new Promise((resolve) => jobWaiters.push(resolve));
+  activeJobs += 1;
+}
+function releaseSlot() {
+  activeJobs = Math.max(0, activeJobs - 1);
+  const next = jobWaiters.shift();
+  if (next) next();
+}
+
+/** 长任务进度：客户端给了 progressToken 才发，没有就静默跳过。
+ *  没有它，CPU 模式下几分钟的翻唱很容易被客户端当成「卡死」。 */
+function progressReporter(extra) {
+  const token = extra?._meta?.progressToken;
+  const send = extra?.sendNotification;
+  if (token === undefined || typeof send !== 'function') return () => {};
+  let n = 0;
+  return (message) => {
+    n += 1;
+    Promise.resolve(send({
+      method: 'notifications/progress',
+      params: { progressToken: token, progress: n, total: 6, message },
+    })).catch(() => {});
+  };
 }
 
 function json(value) {
@@ -399,11 +574,12 @@ const server = new McpServer({ name: 'sing', version: '1.0.0' });
 
 server.tool(
   'sing_probe',
-  '检查唱歌链路是否就绪：yt-dlp / ffmpeg / torch(CUDA) / demucs / RVC 工程 / 音色模型。要确认「现在能不能真翻唱」时先调这个。',
+  '检查唱歌链路是否就绪：yt-dlp / ffmpeg / torch(CUDA) / demucs / RVC 工程 / 音色模型 / contentvec / 输出目录可写。' +
+    '返回里 aiReady 表示能不能真翻唱，aiMissing 是还缺什么，originalReady 表示能不能出原唱片段。要确认「现在能不能唱」时先调这个。',
   {},
   async () => {
     try {
-      return json(await readiness());
+      return json(await readiness({ fresh: true }));
     } catch (error) {
       return err(`自检失败：${error?.message ?? error}`);
     }
@@ -412,7 +588,9 @@ server.tool(
 
 server.tool(
   'sing_search',
-  '在线搜歌（B站优先，YouTube 兜底），返回候选的标题/时长/链接。不确定是哪一版时，先用它挑一首再调 sing_cover。',
+  '在线搜歌（B站优先，YouTube 兜底），返回候选的标题/时长/播放量/链接(含上传者)。' +
+    '挑版本时优先选播放量高、时长 1.5~8 分钟的整曲；标着「切片/片段/翻唱/live」的往往是几十秒的短视频，' +
+    '拿去翻唱会直接踩到副歌中间。不确定是哪一版时，先用它挑一首再调 sing_cover。',
   {
     query: z.string().min(1).max(80).describe('歌名，可带歌手（如「恋爱循环 花泽香菜」）'),
     limit: z.number().int().min(1).max(8).optional().describe('返回几条，默认 5'),
@@ -435,33 +613,31 @@ server.tool(
     song: z.string().min(1).max(80).describe('歌名，可带歌手'),
     seconds: z.number().int().min(5).max(MAX_SECONDS).optional().describe(`截多长，最长 ${MAX_SECONDS} 秒，默认 ${DEFAULT_SECONDS}`),
     startSeconds: z.number().min(0).max(3600).optional().describe('从第几秒开始截（默认 0；想抓高潮段可以自己估一个）'),
-    mode: z.enum(['original', 'ai']).optional().describe('original=原唱片段（默认）；ai=用目标音色翻唱'),
-    candidate: z.number().int().min(1).max(8).optional().describe('搜索结果里取第几个（默认 1，可用 sing_search 先看）'),
+    mode: z.enum(['original', 'ai']).default('original').describe('original=原唱片段（默认）；ai=用目标音色翻唱'),
+    candidate: z.number().int().min(1).max(8).optional().describe('搜索结果里取第几个（默认 1；取第 N 个时会把搜索条数相应放宽，可用 sing_search 先看）'),
     pitch: z.number().int().min(-24).max(24).optional().describe(`变调（半音）。默认留空：脚本按原唱音域自动定调（上限 +${MAX_PITCH}）。只有明确知道原唱比目标音色低一个八度时才手填`),
   },
-  async ({ song, seconds, startSeconds, mode, candidate, pitch }) => {
+  async ({ song, seconds, startSeconds, mode, candidate, pitch }, extra) => {
     const wantAi = mode === 'ai';
+    const report = progressReporter(extra);
+    await acquireSlot();
     try {
       if (wantAi) {
         const checks = await readiness();
-        const missing = [];
-        if (!checks.venv.ok) missing.push(`Python venv（${VENV_PY}）`);
-        if (!checks.torch.ok) missing.push(`PyTorch（${checks.torch.detail ?? '未安装'}）`);
-        if (!checks.demucs.ok) missing.push('demucs（人声分离）');
-        if (!checks.rvc.ok) missing.push(`RVC 推理代码（${RVC_DIR}）`);
-        if (!checks.coverScript.ok) missing.push(`RVC 驱动脚本（${COVER_SCRIPT}）`);
-        if (!checks.voiceModel.ok) missing.push(`音色模型（${AI_VOICE_MODEL}）`);
-        if (missing.length) {
-          return err(`AI 翻唱还没就绪，缺少：${missing.join('、')}。可以先用 mode=original 出原唱片段，或先把环境装完。`);
+        if (checks.aiMissing.length) {
+          return err(`AI 翻唱还没就绪，缺少：${checks.aiMissing.join('、')}。可以先用 mode=original 出原唱片段，或先把环境装完（详见 sing_probe 的 path 字段）。`);
         }
       }
+      report('搜歌');
       let length = Math.min(seconds ?? DEFAULT_SECONDS, MAX_SECONDS);
-      const results = await searchSongs(song, 5);
+      // candidate 最大 8，搜索条数必须跟上，否则 candidate=6~8 永远取不到
+      const results = await searchSongs(song, Math.max(5, candidate ?? 1));
       const picked = results[Math.max(0, Math.min((candidate ?? 1) - 1, results.length - 1))];
       if (!picked) throw new Error('没有搜到可用结果');
       await fsp.mkdir(WORK_DIR, { recursive: true });
-      const base = path.join(WORK_DIR, `${wantAi ? 'ai' : 'src'}-${stamp()}`);
+      const base = path.join(WORK_DIR, `${wantAi ? 'ai' : 'src'}-${stamp()}-${process.pid}-${Math.random().toString(36).slice(2, 6)}`);
       await fsp.mkdir(base, { recursive: true });
+      report('下载音源');
       const downloaded = await downloadAudio(picked.url, path.join(base, 'src'));
       const total = await probeDuration(downloaded);
       // 起始点与时长：歌名命中用户规则就强制用它（不让模型再自己估前奏长度）
@@ -472,6 +648,7 @@ server.tool(
       const outFile = uniqueOutPath(outName);
 
       if (!wantAi) {
+        report('截取片段');
         await cutSegment(downloaded, outFile, start, length);
         await fsp.unlink(downloaded).catch(() => {});
         return json({
@@ -491,9 +668,11 @@ server.tool(
       }
 
       // ── AI 翻唱：截片段 → 分离人声/伴奏 → 换音色 → 混回伴奏 ──
+      report('截取片段');
       const clipWav = path.join(base, 'clip.wav');
       await cutSegment(downloaded, clipWav, start, length);
       await fsp.unlink(downloaded).catch(() => {});
+      report('分离人声与伴奏');
       const { vocals, instrumental } = await separateVocals(clipWav, base);
       const converted = path.join(base, 'vocals-ai.wav');
       // ── 定调：把源人声搬到目标音色的舒适区，而不是机械升降八度 ──
@@ -519,7 +698,9 @@ server.tool(
           }
         }
       }
+      report(`用目标音色转换（pitch=${usePitch}）`);
       await convertVoice(vocals, converted, usePitch);
+      report('混音与响度归一');
       await mixTracks(converted, instrumental, outFile, length);
 
       return json({
@@ -541,6 +722,11 @@ server.tool(
       });
     } catch (error) {
       return err(`唱歌失败：${error?.message ?? error}`);
+    } finally {
+      releaseSlot();
+      // 失败分支也要清：跑坏的 work 目录一样占几十上百 MB
+      pruneWork();
+      pruneOutput();
     }
   },
 );

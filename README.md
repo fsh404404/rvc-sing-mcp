@@ -21,8 +21,10 @@ An MCP server that turns "sing me this song" into a ready-to-send audio file, us
 | 自动定调 | 先估原唱人声中位基频，再把音域搬到目标音色的舒适区，而不是机械升八度 |
 | 起唱点记忆 | 按歌名记住「第几秒开唱、唱多长」，避免每次都把前奏唱进去 |
 | 索引自动启用 | `model/` 下存在 faiss `.index` 就自动开启检索（音色更贴），没有就纯模型推理 |
+| 并发排队 | 同时来两首歌会排队而不是并行抢显存（`maxConcurrent`，默认 1） |
+| 磁盘自清 | `sing/work/` 与 `output/` 按数量保留最近 N 个，7×24 跑不会撑爆盘 |
 | 零硬编码 | 所有路径走配置/环境变量，clone 到哪都能跑 |
-| 结构化自检 | 缺依赖时一次列全，绝不「悄悄地」把 ai 模式降级成原唱 |
+| 结构化自检 | 缺依赖时一次列全（含 contentvec / rmvpe / 输出目录可写），绝不「悄悄地」把 ai 模式降级成原唱 |
 | 工程坑已踩平 | 老版 ffmpeg 的 amix 电平问题、新显卡算子缺失、B站 412、faiss 读不了中文路径 |
 
 ## 目录结构
@@ -60,7 +62,7 @@ rvc-sing-mcp/
 ## 快速开始
 
 ```bash
-git clone https://github.com/<you>/rvc-sing-mcp.git
+git clone https://github.com/fsh404404/rvc-sing-mcp.git
 cd rvc-sing-mcp
 npm install
 cp config.example.json config.json   # Windows: copy config.example.json config.json
@@ -196,7 +198,14 @@ SING_DIR=E:\your\existing\sing
 
 ### `sing_probe`
 
-无参数。返回每个环节的 `ok/detail/path`：`ytdlp` `ffmpeg` `venv` `torch` `demucs` `rvc` `coverScript` `voiceModel` `outputDir`。
+无参数。返回每个环节的 `ok/detail/path`：`ytdlp` `ffmpeg` `venv` `torch` `demucs` `rvc` `coverScript` `f0Script` `voiceModel` `contentvec` `rmvpe` `rvcRuntime` `index` `outputDir` `startOffsetsFile`。
+
+另外返回三个汇总字段，省得 agent 自己拼判断：
+
+- `aiReady` / `aiMissing`：能不能真翻唱、还缺哪几样（与 `sing_cover(mode=ai)` 的前置检查同一份清单）；
+- `originalReady`：能不能出原唱片段（只依赖 yt-dlp + ffmpeg + 可写的输出目录）。
+
+`ytdlp` / `ffmpeg` 是**真的 spawn 一次**判的，不是 `existsSync`——装在 PATH 里也算就绪。
 
 ### `sing_search`
 
@@ -230,15 +239,18 @@ SING_DIR=E:\your\existing\sing
 |---|---|---|---|
 | `singDir` | `SING_DIR` | `sing` | 工作目录：venv / 模型 / 脚本 / 中间产物 |
 | `outputDir` | `SING_OUTPUT_DIR` | `output` | 成品目录 |
-| `model` | `SING_MODEL` | `xiaoxiao.pth` | 音色模型文件名（相对 `sing/model/`） |
+| `model` | `SING_MODEL` | `xiaoxiao.pth` | 音色模型文件名（相对 `sing/model/`，也可直接给绝对路径） |
 | `device` | `SING_DEVICE` | `cuda` | demucs 设备：`cuda` / `cpu` |
 | `maxSeconds` | `SING_MAX_SECONDS` | `60` | 单次最长秒数 |
 | `defaultSeconds` | `SING_DEFAULT_SECONDS` | `30` | 不传 seconds 时的长度 |
 | `targetF0` | `SING_TARGET_F0` | `250` | 定调目标基频（Hz） |
 | `femaleF0Threshold` | `SING_FEMALE_F0` | `200` | 高于此值视为女声区，不再升调 |
 | `maxPitch` | `SING_MAX_PITCH` | `12` | 自动定调上限（半音） |
-| `startOffsetsFile` | `SING_START_OFFSETS` | `start-offsets.json` | 起唱点规则文件 |
+| `startOffsetsFile` | `SING_START_OFFSETS` | `start-offsets.json` | 起唱点规则文件（相对 `singDir`，也可给绝对路径） |
 | `voiceToolName` | `SING_VOICE_TOOL` | `send_voice` | 仅用于提示文案 |
+| `maxConcurrent` | `SING_MAX_CONCURRENT` | `1` | 同时跑几首。**别调大**：RVC 很吃显存，两个群同时点歌就是 OOM |
+| `keepWork` | `SING_KEEP_WORK` | `3` | `sing/work/` 保留最近几个任务目录，`0`=不清理 |
+| `keepOutput` | `SING_KEEP_OUTPUT` | `20` | `output/` 保留最近几个 `sing-*.mp3`，`0`=不清理 |
 | `pythonPath` | `SING_PYTHON` | `sing/venv/...` | 自动探测 |
 | `ffmpegPath` | `SING_FFMPEG` | PATH | 自动探测 |
 | `ytdlpPath` | `SING_YTDLP` | venv/PATH | 自动探测 |
@@ -253,6 +265,20 @@ SING_DIR=E:\your\existing\sing
 ```
 
 键是歌名子串（不区分大小写），命中即覆盖估算值；以 `_` 开头的键会被忽略（可用来写注释）。
+
+## 接手 7×24 跑之前的两件事
+
+接进机器人之后它就不再是「手动开一次」的工具了，这两条不做，跑一周就出事：
+
+1. **并发**：`maxConcurrent` 默认 `1`。请求来第二个时会**排队**，不会并行抢显存。
+   排队发生在 MCP 进程内，客户端那边只是这次调用慢一点，不会报错。
+2. **磁盘**：每次 `sing_cover` 会在 `sing/work/` 下留一个 50~150 MB 的目录（下载源 + 分离后的 wav）。
+   默认只保留最近 `keepWork=3` 个任务目录、`output/` 只保留最近 `keepOutput=20` 个成品，
+   清理在每次调用的收尾统一做（成功失败都清）。想自己管就设 `0` 关掉。
+
+长任务还有进度通知：客户端传了 `progressToken` 时，`sing_cover` 会按
+「搜歌 → 下载 → 截取 → 分离 → 转换 → 混音」六步上报 `notifications/progress`。
+CPU 模式下翻唱要几分钟，没有这个很容易被客户端判成卡死。
 
 ## 为什么参数是这些值
 

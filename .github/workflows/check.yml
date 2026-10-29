@@ -1,0 +1,33 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      # 只做语法/依赖层面的检查：自检（scripts/probe.mjs）需要真实 RVC 环境，
+      # 在 CI 里必然全红，不适合当门槛。
+      - run: npm run check
+      - name: 冒烟：能起 server、能看到三个工具
+        run: |
+          node -e "
+          import('@modelcontextprotocol/sdk/client/index.js').then(async ({ Client }) => {
+            const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
+            const t = new StdioClientTransport({ command: process.execPath, args: ['src/mcp-sing.js'], stderr: 'ignore' });
+            const c = new Client({ name: 'ci', version: '1' });
+            await c.connect(t);
+            const { tools } = await c.listTools();
+            const names = tools.map((x) => x.name).sort().join(',');
+            console.log('tools:', names);
+            await c.close();
+            if (names !== 'sing_cover,sing_probe,sing_search') process.exit(1);
+          });
+          "

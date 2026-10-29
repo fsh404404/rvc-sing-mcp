@@ -38,6 +38,12 @@ const DEFAULTS = {
   pythonPath: '',
   ffmpegPath: '',
   ytdlpPath: '',
+  // 同时跑几首（默认 1：RVC 很吃显存，两个群同时点歌会 OOM）
+  maxConcurrent: 1,
+  // 中间产物保留几个 work 目录（0 = 不清理）
+  keepWork: 3,
+  // 成品目录保留几个 sing-*.mp3（0 = 不清理）
+  keepOutput: 20,
 };
 
 function readConfigFile() {
@@ -61,6 +67,15 @@ function pick(name, envName, raw) {
 
 function abs(p) {
   return path.isAbsolute(p) ? p : path.join(ROOT, p);
+}
+
+/** 相对某个目录解析；但允许直接给绝对路径。
+ *  [坑] 早先用 path.join(singDir, x) 处理，用户在 SING_START_OFFSETS / SING_MODEL
+ *  里写了绝对路径时会被拼成 "<singDir>\\E:\\cfg\\x.json" 这种永不存在的位置，
+ *  表现为「规则文件明明写了却不生效」——静默失效，最难查。 */
+function absUnder(dir, p) {
+  const text = String(p ?? '');
+  return path.isAbsolute(text) ? text : path.join(dir, text);
 }
 
 /** 可执行文件探测：给了就用，没给就试几个常见位置，最后交给 PATH。 */
@@ -111,25 +126,43 @@ export function loadConfig() {
     return Number.isFinite(v) && v > 0 ? v : DEFAULTS[name];
   };
 
+  // 正整数/零：0 表示「不清理」
+  const count = (name, envName) => {
+    const v = Math.trunc(Number(pick(name, envName, raw)));
+    return Number.isFinite(v) && v >= 0 ? v : DEFAULTS[name];
+  };
+
+  const modelName = String(pick('model', 'SING_MODEL', raw));
+
   return {
     singDir,
     outputDir,
     pythonPath,
     ytdlpPath,
     ffmpegPath,
-    model: String(pick('model', 'SING_MODEL', raw)),
+    model: modelName,
     device: String(pick('device', 'SING_DEVICE', raw)),
     maxSeconds: Math.trunc(num('maxSeconds', 'SING_MAX_SECONDS')),
     defaultSeconds: Math.trunc(num('defaultSeconds', 'SING_DEFAULT_SECONDS')),
     targetF0: num('targetF0', 'SING_TARGET_F0'),
     femaleF0Threshold: num('femaleF0Threshold', 'SING_FEMALE_F0'),
     maxPitch: Math.trunc(num('maxPitch', 'SING_MAX_PITCH')),
-    startOffsetsFile: path.join(singDir, String(pick('startOffsetsFile', 'SING_START_OFFSETS', raw))),
+    startOffsetsFile: absUnder(singDir, pick('startOffsetsFile', 'SING_START_OFFSETS', raw)),
     voiceToolName: String(pick('voiceToolName', 'SING_VOICE_TOOL', raw)),
+    // 并发与磁盘：7x24 跑在机器人里时，这两项决定「会不会把显存和磁盘跑爆」
+    maxConcurrent: Math.max(1, count('maxConcurrent', 'SING_MAX_CONCURRENT')),
+    keepWork: count('keepWork', 'SING_KEEP_WORK'),
+    keepOutput: count('keepOutput', 'SING_KEEP_OUTPUT'),
     workDir: path.join(singDir, 'work'),
-    pthModel: path.join(singDir, 'model', String(pick('model', 'SING_MODEL', raw))),
+    pthModel: absUnder(path.join(singDir, 'model'), modelName),
     coverScript: path.join(singDir, 'cover.py'),
     f0Script: path.join(singDir, 'est_f0.py'),
     rvcDir: path.join(singDir, 'rvc_cli'),
+    rvcRuntimeDir: path.join(singDir, 'rvc'),
+    contentvecCandidates: [
+      path.join(singDir, 'rvc', 'models', 'embedders', 'contentvec', 'pytorch_model.bin'),
+      path.join(singDir, 'contentvec', 'pytorch_model.bin'),
+    ],
+    rmvpeModel: path.join(singDir, 'model', 'rmvpe.pt'),
   };
 }

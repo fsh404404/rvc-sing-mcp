@@ -120,10 +120,12 @@ copy config.example.json config.json
 **验收**：
 
 ```bash
-node scripts/probe.mjs
+node scripts/probe.mjs                 # 全部项 ok:true
+node scripts/probe.mjs --mode=ai       # 只看「能不能翻唱」（aiReady）
+node scripts/probe.mjs --mode=original # 只看「能不能出原唱片段」
 ```
 
-期望所有项 `ok: true`。`torch` 一行会打印版本与 `is_available()`。
+`torch` 一行会打印版本与 `is_available()`。`aiMissing` 列出的就是还差的那几样。
 
 ## 6. GPU 是否真的在工作
 

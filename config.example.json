@@ -10,6 +10,9 @@
   "maxPitch": 12,
   "startOffsetsFile": "start-offsets.json",
   "voiceToolName": "send_voice",
+  "maxConcurrent": 1,
+  "keepWork": 3,
+  "keepOutput": 20,
   "pythonPath": "",
   "ffmpegPath": "",
   "ytdlpPath": ""

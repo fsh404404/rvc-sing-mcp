@@ -79,6 +79,10 @@ Error: spawn ffmpeg.exe ENOENT
 
 按 `config.json` 里的 `ffmpegPath` / `ytdlpPath` 显式指定绝对路径，或用环境变量 `SING_FFMPEG` / `SING_YTDLP`。Windows 上路径含空格要保留引号（JSON 字符串本身不需要）。
 
+> `sing_probe` 是真的 spawn 一次 `ffmpeg -version` 来判定，所以**装在 PATH 上也算就绪**。
+> 如果它报 `ok:false` 且 detail 是「找不到可执行文件」，那是真的不在配置里也不在 PATH 上——
+> 注意 MCP 客户端启动的子进程 PATH 可能和你终端里的不同（见上面「客户端不透传环境变量」）。
+
 ---
 
 ## demucs 第一次运行卡在下载
