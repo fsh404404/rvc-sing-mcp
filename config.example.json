@@ -1,0 +1,16 @@
+{
+  "singDir": "sing",
+  "outputDir": "output",
+  "model": "xiaoxiao.pth",
+  "device": "cuda",
+  "maxSeconds": 60,
+  "defaultSeconds": 30,
+  "targetF0": 250,
+  "femaleF0Threshold": 200,
+  "maxPitch": 12,
+  "startOffsetsFile": "start-offsets.json",
+  "voiceToolName": "send_voice",
+  "pythonPath": "",
+  "ffmpegPath": "",
+  "ytdlpPath": ""
+}

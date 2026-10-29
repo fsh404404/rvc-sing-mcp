@@ -1,0 +1,15 @@
+{
+  "_说明": "把这段合并进你的 MCP 客户端配置。路径按实际 clone 位置修改；env 里可以覆盖 config.json 的任何字段。",
+  "mcpServers": {
+    "sing": {
+      "command": "node",
+      "args": ["<绝对路径>/rvc-sing-mcp/src/mcp-sing.js"],
+      "env": {
+        "SING_DIR": "",
+        "SING_OUTPUT_DIR": "",
+        "SING_MODEL": "xiaoxiao.pth",
+        "SING_DEVICE": "cuda"
+      }
+    }
+  }
+}

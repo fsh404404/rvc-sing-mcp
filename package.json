@@ -1,0 +1,41 @@
+{
+  "name": "rvc-sing-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for AI song covers: search a song online, separate vocals, convert to your RVC voice model, and output a ready-to-send audio file.",
+  "type": "module",
+  "main": "src/mcp-sing.js",
+  "bin": {
+    "rvc-sing-mcp": "src/mcp-sing.js"
+  },
+  "files": [
+    "src",
+    "python",
+    "docs",
+    "examples",
+    "config.example.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node src/mcp-sing.js",
+    "probe": "node scripts/probe.mjs",
+    "check": "node --check src/mcp-sing.js && node --check src/config.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "rvc",
+    "voice-conversion",
+    "ai-cover",
+    "qq-bot",
+    "tts"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  },
+  "license": "MIT"
+}

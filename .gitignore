@@ -1,0 +1,41 @@
+# 依赖
+node_modules/
+
+# 本地配置（含机器相关路径，不入库；用 config.example.json 复制一份）
+config.json
+
+# 唱歌链路的工作目录：venv、模型、中间产物、成品
+sing/venv/
+sing/model/
+sing/rvc/
+sing/rvc_cli/
+sing/work/
+sing/tmp/
+sing/wheels/
+sing/_unzip/
+sing/contentvec/
+sing/*.index
+
+# 产物
+output/
+
+# 第三方权重与音频大文件
+*.pth
+*.safetensors
+*.index
+*.pt
+*.wav
+*.mp3
+*.flac
+*.onnx
+*.bin
+
+# 规则文件由使用者维护，只在仓库里保留示例
+start-offsets.json
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

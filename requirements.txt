@@ -1,0 +1,34 @@
+# rvc-sing-mcp 的 Python 依赖（Python 3.10~3.12，实测 3.12）
+#
+# 安装：
+#   python -m venv venv
+#   venv\Scripts\python -m pip install -U pip
+#   venv\Scripts\python -m pip install -r requirements.txt
+#
+# torch 必须是 CUDA 12.8 及以上版本，才能覆盖新显卡（RTX 50 系 sm_120）的算子。
+# 没有 N 卡：去掉 +cu128 后缀、改从 PyPI 装纯 CPU 版，并把 config.json 的 device 改成 cpu。
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch==2.7.1+cu128
+torchaudio==2.7.1+cu128
+
+# 人声/伴奏分离
+demucs==4.1.0
+
+# RVC 推理与音频处理
+librosa==1.0.0
+soundfile==0.14.0
+numpy==2.5.4
+scipy==1.18.1
+faiss-cpu==1.15.1
+noisereduce==3.0.3
+pedalboard==0.9.26
+stftpitchshift==2.0
+safetensors==0.8.0
+transformers==4.46.3
+torchcrepe==0.0.24
+torch-einops-utils==0.1.37
+
+# 搜歌/下载
+yt-dlp==2026.10.21
