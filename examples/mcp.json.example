@@ -1,14 +1,22 @@
 {
-  "_说明": "把这段合并进你的 MCP 客户端配置。路径按实际 clone 位置修改；env 里可以覆盖 config.json 的任何字段。",
+  "_说明": [
+    "把这段合并进你的 MCP 客户端配置，args 与 env 换成你机器上的实际路径。",
+    "env 留空字符串等于不设置，会回落到 config.json 再回落到默认值。",
+    "SING_OUTPUT_DIR 必须指向机器人框架的语音库，否则产物发不出去。",
+    "SING_VOICE_TOOL 只影响返回文案里的提示，改成你框架里真实发语音的工具名。",
+    "部分客户端不透传 env，那种情况下改用仓库根目录的 config.json。"
+  ],
   "mcpServers": {
     "sing": {
       "command": "node",
       "args": ["<绝对路径>/rvc-sing-mcp/src/mcp-sing.js"],
       "env": {
-        "SING_DIR": "",
-        "SING_OUTPUT_DIR": "",
+        "SING_DIR": "<sing 目录，含 venv / model / rvc_cli>",
+        "SING_OUTPUT_DIR": "<机器人框架的语音库目录>",
+        "SING_FFMPEG": "<ffmpeg 可执行文件，留空则自动探测>",
         "SING_MODEL": "xiaoxiao.pth",
-        "SING_DEVICE": "cuda"
+        "SING_DEVICE": "cuda",
+        "SING_VOICE_TOOL": "send_voice"
       }
     }
   }

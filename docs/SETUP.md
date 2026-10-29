@@ -139,6 +139,27 @@ sing\venv\Scripts\python python\check-cuda.py
 
 第一次对话可以让 agent 先调用 `sing_probe`，确认无误再说「唱一首《晴天》」。
 
+### 已经有跑通的机器：复用而不是重装
+
+换机器、或把它接进已经在跑的机器人时，`sing/` 目录（venv + 模型 + `rvc_cli`，约 12 GB）**不需要重装**，指过去就行：
+
+```
+SING_DIR=<原机器上的 sing 目录>
+SING_OUTPUT_DIR=<机器人框架的语音库目录>
+SING_FFMPEG=<ffmpeg 可执行文件>
+SING_VOICE_TOOL=<框架里发语音的工具名>
+```
+
+四个必查点与「现象 → 原因」对照表见 [README 的「接进已有机器人框架」](../README.md#接进已有机器人框架四条前提)。
+
+### 客户端不透传环境变量
+
+少数 MCP 客户端只把 `command` / `args` 传下去，不继承父进程环境。症状是 `env` 里怎么写都不生效。
+
+最可靠的绕法是**不用环境变量**：在仓库根目录放一份 `config.json`（从 `config.example.json` 复制），程序默认就会读它，不依赖任何 env。
+
+排查时先跑 `node scripts/probe.mjs`：它会把最终生效的路径打印出来，和你在客户端里配的对一下，就知道有没有透传成功。
+
 ## 8. 目录与磁盘占用参考
 
 | 目录 | 说明 | 参考体积 |

@@ -133,6 +133,65 @@ node scripts/probe.mjs
 
 然后对 agent 说「唱一首《晴天》」——它会先 `sing_probe`，再 `sing_search` 挑版本，最后 `sing_cover(mode="ai")`。
 
+### 接进已有机器人框架：四条前提
+
+这套服务只造文件，接进你现成的机器人（QQ / Telegram / Discord…）时有四件事必须对上。对不上时的典型表现是「翻唱跑成功了，但一点声音都没有」。
+
+**1. `node_modules` 不在仓库里**
+
+`.gitignore` 排除了它。clone 后不装依赖就注册 MCP，客户端会直接启动失败：
+
+```
+Error: Cannot find module '@modelcontextprotocol/sdk/...'
+```
+
+**2. `sing/` 环境不进仓库**
+
+venv、模型、`rvc_cli` 加起来约 12 GB，都在 `.gitignore` 里。**已经有跑通环境的机器不用重装**，把 `SING_DIR` 指过去复用即可：
+
+```
+SING_DIR=E:\your\existing\sing
+```
+
+重装一份的代价不小——光 torch 的 cu 轮子就 3 GB 起。
+
+**3. 它不读你框架的配置文件**
+
+本服务只认三样：环境变量 > 自己的 `config.json` > 内置默认值。宿主框架里的 `voice.dir`、`ffmpeg` 路径之类**完全不会被继承**，必须在注册时用 `env` 显式传进去：
+
+```json
+{
+  "mcpServers": {
+    "sing": {
+      "command": "node",
+      "args": ["<绝对路径>/rvc-sing-mcp/src/mcp-sing.js"],
+      "env": {
+        "SING_DIR": "<sing 目录>",
+        "SING_OUTPUT_DIR": "<框架的语音库目录>",
+        "SING_FFMPEG": "<ffmpeg 可执行文件>",
+        "SING_VOICE_TOOL": "<你框架里发语音的工具名>"
+      }
+    }
+  }
+}
+```
+
+> 部分 MCP 客户端默认不透传父进程的环境变量。改了 `env` 却毫无反应时，改用 `config.json`（放仓库根目录，或用 `SING_CONFIG` 指到别处）。`scripts/probe.mjs` 就是踩了这个坑之后补出来的。
+
+**4. 成品目录必须落在框架的语音库**
+
+`SING_OUTPUT_DIR` 默认是仓库下的 `output/`。多数机器人在发语音时只认一个白名单目录（语音库），产物放错地方会被「文件不存在 / 不在允许列表」拒掉。**把 `SING_OUTPUT_DIR` 指到那个目录**即可；文件名本身已带 `sing-` 前缀，方便下游识别和限流。
+
+排障对照：
+
+| 现象 | 真实原因 |
+|---|---|
+| MCP 启动即失败，报 `Cannot find module` | 没执行 `npm install` |
+| `sing_probe` 里 `venv` / `torch` 全是 false | `SING_DIR` 没指到实际环境 |
+| 工具返回成功，但目录里没有文件 | `SING_OUTPUT_DIR` 指错或不可写 |
+| 文件生成了，机器人却发不出去 | 产物不在框架的语音库 / 白名单内 |
+| 改了 `env` 但参数不生效 | 客户端没传环境变量，改用 `config.json` |
+
 ## 工具
 
 ### `sing_probe`
