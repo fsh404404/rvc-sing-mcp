@@ -246,6 +246,8 @@ SING_DIR=E:\your\existing\sing
 | `targetF0` | `SING_TARGET_F0` | `250` | 定调目标基频（Hz） |
 | `femaleF0Threshold` | `SING_FEMALE_F0` | `200` | 高于此值视为女声区，不再升调 |
 | `maxPitch` | `SING_MAX_PITCH` | `12` | 自动定调上限（半音） |
+| `f0Engine` | `SING_F0_ENGINE` | `auto` | 估调引擎：`auto`（有 rmvpe 就用，否则 pyin）/ `rmvpe` / `pyin` |
+| `f0MaxSeconds` | `SING_F0_MAX_SECONDS` | `40` | 估调最多取多少秒人声 |
 | `startOffsetsFile` | `SING_START_OFFSETS` | `start-offsets.json` | 起唱点规则文件（相对 `singDir`，也可给绝对路径） |
 | `voiceToolName` | `SING_VOICE_TOOL` | `send_voice` | 仅用于提示文案 |
 | `maxConcurrent` | `SING_MAX_CONCURRENT` | `1` | 同时跑几首。**别调大**：RVC 很吃显存，两个群同时点歌就是 OOM |
@@ -288,6 +290,17 @@ CPU 模式下翻唱要几分钟，没有这个很容易被客户端判成卡死�
 - **`volume_envelope=0.25`**：比默认 1 稳，高音不再被源音量包络顶到爆音（高音段能量差从 −1.8 dB 收到 −0.7 dB）。
 - **目标音域法（`targetF0=250`）**：以一首源中位 183 Hz 的歌为例，机械 +12 会顶到假声、丢帧率最高；把中位搬到 ~247 Hz（+5）丢帧与能量都更自然。
 - **混音 `amix:normalize=0`**：`amix` 默认会把总和除以输入路数（−6 dB），成品比源低约 10 dB，前奏听起来像「卡住没声」。新 ffmpeg 用 `normalize=0`，老版本不认该参数时回退到 `volume=2` 补回那 6 dB。
+
+## 定调引擎：为什么估调也走 rmvpe
+
+`cover.py` 换音色时用 rmvpe 提 f0；如果估调这里另用 `librosa.pyin`，两套算法对同一段人声的中位数可能差一点点，个别歌会因此差一个半音。pyin 本身也慢（CPU 上 40 秒人声要十几秒）。
+
+所以 `est_f0.py` 默认 `--engine=auto`：**先试 rmvpe，探测不到入口或权重就自动退回 pyin**，两条路都失败才返回 0（上层当作「估不出来」，按 0 调处理，不阻断出歌）。
+
+- 结果里带 `ENGINE=rmvpe|pyin|none`，`sing_cover` 的返回 JSON 里对应 `sourceF0Engine`；
+- 想固定用哪套：`SING_F0_ENGINE=pyin` 或 `rmvpe`；
+- rmvpe 的入口在不同 RVC 包里位置不一样（`rvc_cli.rvc.infer.lib.rmvpe` / `rvc_cli.rvc.lib.rmvpe` / `infer.lib.rmvpe`…），脚本会依次尝试；构造签名也按常见几种适配；
+- 换引擎后**音域判断可能变化**（差 1 个半音）。对同一首歌两种引擎各跑一次、对比 `sourceMedianF0`，确认没有意外跳档再上生产。
 
 ## 已知问题
 

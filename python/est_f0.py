@@ -1,21 +1,207 @@
 # 估算一段人声的中位基频（Hz），用于判断「原唱是男声还是女声」，避免乱升调。
 #
-# 用法： python est_f0.py <音频>
-# 输出： MEDIAN_F0=369.8 VOICED_RATIO=0.82
+# 用法：
+#   python est_f0.py <音频> [--engine=auto|rmvpe|pyin] [--max-seconds=40]
+#
+# 输出（给 mcp-sing.js 解析）：
+#   MEDIAN_F0=369.8 VOICED_RATIO=0.82 ENGINE=rmvpe SECONDS=40
+#   MEDIAN_F0=0 REASON=librosa_missing ENGINE=none
+#
+# 为什么要有 engine 开关：
+#   cover.py 换音色时用 rmvpe 提 f0。估调这里如果另用 librosa.pyin，
+#   两套算法对同一段人声的中位数可能差一点点，个别歌会因此差一个半音；
+#   pyin 在 CPU 上也要十几秒（hop 256、全曲 40 秒）。
+#   用同一个 rmvpe 既快，又保证「估调的依据」和「转换的依据」是同一条曲线。
+#
+#   但 rmvpe 的入口在不同 RVC 包里位置不一样（rvc_cli.rvc.infer.lib / rvc_cli.rvc.lib /
+#   infer.lib …），探测不到就自动退回 pyin，绝不因为引擎不可用让整条链路失败。
+#   想固定用哪套就传 --engine=pyin 或 --engine=rmvpe。
+import importlib
+import os
 import sys
 
-import librosa
-import numpy as np
+SING = os.path.dirname(os.path.abspath(__file__))
+PYIN_SR = 22050
+RMVPE_SR = 16000
 
-SR = 22050
-p = sys.argv[1]
-y, _ = librosa.load(p, sr=SR, mono=True)
-if len(y) > SR * 40:          # 只取前 40 秒，够估中位数了
-    y = y[: SR * 40]
-f0, vflag, _ = librosa.pyin(y, fmin=65, fmax=1200, sr=SR, hop_length=256,
-                            frame_length=2048, fill_na=np.nan)
-vals = f0[np.isfinite(f0)]
-if vals.size == 0:
-    print("MEDIAN_F0=0 VOICED_RATIO=0")
-else:
-    print(f"MEDIAN_F0={float(np.median(vals)):.1f} VOICED_RATIO={vals.size / len(f0):.2f}")
+# rmvpe 的常见入口：版本不同位置不同，从最可能到最不可能试一遍
+RMVPE_ENTRY_CANDIDATES = [
+    ("rvc_cli.rvc.infer.lib.rmvpe", "RMVPE"),
+    ("rvc_cli.rvc.lib.rmvpe", "RMVPE"),
+    ("rvc_cli.rmvpe", "RMVPE"),
+    ("infer.lib.rmvpe", "RMVPE"),
+]
+# rmvpe 权重：cover.py 会把它复制进 rvc_cli，两个位置都认
+RMVPE_WEIGHTS = [
+    os.path.join(SING, "rvc_cli", "rvc", "models", "predictors", "rmvpe.pt"),
+    os.path.join(SING, "model", "rmvpe.pt"),
+]
+
+
+def parse_args(argv):
+    opts = {"audio": None, "engine": "auto", "max_seconds": 40.0}
+    for arg in argv[1:]:
+        if arg.startswith("--engine="):
+            opts["engine"] = arg.split("=", 1)[1].strip().lower()
+        elif arg.startswith("--max-seconds="):
+            try:
+                value = float(arg.split("=", 1)[1])
+                if value > 0:
+                    opts["max_seconds"] = value
+            except ValueError:
+                pass
+        elif not arg.startswith("--") and opts["audio"] is None:
+            opts["audio"] = arg
+    return opts
+
+
+def load_audio(path, sr, max_seconds):
+    import librosa
+
+    y, _ = librosa.load(path, sr=sr, mono=True)
+    limit = int(sr * max_seconds)
+    if y.size > limit:
+        y = y[:limit]
+    return y, sr
+
+
+def median_of(values):
+    import numpy as np
+
+    if values is None or len(values) == 0:
+        return 0.0
+    return float(np.median(values))
+
+
+def f0_pyin(y, sr):
+    """librosa.pyin：不依赖 RVC，任何环境只要有 librosa 就能跑，但慢。"""
+    import librosa
+    import numpy as np
+
+    f0, _voiced_flag, _probs = librosa.pyin(
+        y, fmin=65, fmax=1200, sr=sr, hop_length=256, frame_length=2048, fill_na=np.nan,
+    )
+    vals = f0[np.isfinite(f0)]
+    return vals, float(len(f0))
+
+
+def import_rmvpe():
+    for module_name, class_name in RMVPE_ENTRY_CANDIDATES:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+        klass = getattr(module, class_name, None)
+        if klass is not None:
+            return klass, module_name
+    return None, None
+
+
+def build_rmvpe(klass, weights, is_half, device):
+    """不同 RVC 版本的构造签名不一样，按常见几种依次试，全失败再抛。"""
+    attempts = [
+        lambda: klass(weights, is_half, device),
+        lambda: klass(weights, is_half),
+        lambda: klass(weights, device),
+        lambda: klass(weights),
+        lambda: klass(model_path=weights, is_half=is_half, device=device),
+    ]
+    last = None
+    for attempt in attempts:
+        try:
+            return attempt()
+        except TypeError as exc:  # 签名不匹配，换下一种
+            last = exc
+    raise RuntimeError("rmvpe 构造失败：%s" % last)
+
+
+def preflight_rmvpe():
+    """先做便宜的入口/权重检查：这两步失败与「librosa 没装」是两回事，
+    混在一起上报会把人带偏（先看到 librosa 报错，会误以为装个 librosa 就好了）。"""
+    klass, module_name = import_rmvpe()
+    if klass is None:
+        raise RuntimeError(
+            "找不到 rmvpe 入口（试过 %s）" % " / ".join(m for m, _ in RMVPE_ENTRY_CANDIDATES)
+        )
+    weights = next((p for p in RMVPE_WEIGHTS if os.path.exists(p)), None)
+    if weights is None:
+        raise RuntimeError("找不到 rmvpe.pt（放 sing/model/ 或 sing/rvc_cli/rvc/models/predictors/）")
+    return klass, module_name, weights
+
+
+def f0_rmvpe(audio, entry):
+    """与 cover.py 转换阶段同一个 rmvpe，代价低且口径一致。"""
+    klass, module_name, weights = entry
+
+    import numpy as np
+    import torch
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    is_half = device == "cuda"
+    model = build_rmvpe(klass, weights, is_half, device)
+
+    if device == "cuda":
+        with torch.no_grad():
+            f0 = model.infer_from_audio(audio, thred=0.03)
+    else:
+        f0 = model.infer_from_audio(audio, thred=0.03)
+
+    arr = np.asarray(f0, dtype="float32")
+    vals = arr[np.isfinite(arr) & (arr > 0)]
+    print("[est_f0] rmvpe via %s on %s" % (module_name, device), file=sys.stderr)
+    return vals, float(arr.size)
+
+
+def run_engine(name, max_seconds, audio_path):
+    """返回 (vals, frames)；失败抛异常，由调用方决定回退还是放弃。"""
+    if name == "rmvpe":
+        entry = preflight_rmvpe()
+        y, _sr = load_audio(audio_path, RMVPE_SR, max_seconds)
+        if y.size == 0:
+            return None, 0.0
+        return f0_rmvpe(y, entry)
+    y, sr = load_audio(audio_path, PYIN_SR, max_seconds)
+    if y.size == 0:
+        return None, 0.0
+    return f0_pyin(y, sr)
+
+
+def main():
+    opts = parse_args(sys.argv)
+    if not opts["audio"] or not os.path.exists(opts["audio"]):
+        # 上层靠 MEDIAN_F0=0 判定「估不出来」，这里不能崩，否则 stderr 会盖掉 stdout 的解析
+        print("MEDIAN_F0=0 VOICED_RATIO=0.00 ENGINE=none REASON=audio_missing", flush=True)
+        return 0
+
+    engine = opts["engine"] if opts["engine"] in ("rmvpe", "pyin") else "auto"
+    order = ["rmvpe", "pyin"] if engine == "auto" else [engine]
+
+    errors = []
+    for name in order:
+        try:
+            vals, frames = run_engine(name, opts["max_seconds"], opts["audio"])
+        except Exception as exc:
+            errors.append("%s: %s" % (name, exc))
+            print("[est_f0] %s 不可用：%s" % (name, exc), file=sys.stderr)
+            continue
+        if vals is None or len(vals) == 0:
+            errors.append("%s: 没有有效帧" % name)
+            continue
+        voiced = float(len(vals)) / frames if frames else 0.0
+        print(
+            "MEDIAN_F0=%.1f VOICED_RATIO=%.2f ENGINE=%s SECONDS=%.1f"
+            % (median_of(vals), voiced, name, opts["max_seconds"]),
+            flush=True,
+        )
+        return 0
+
+    print(
+        "MEDIAN_F0=0 VOICED_RATIO=0.00 ENGINE=none REASON=%s"
+        % ("; ".join(errors) or "unknown").replace("\n", " ")[:300],
+        flush=True,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

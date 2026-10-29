@@ -47,6 +47,17 @@ sing\venv\Scripts\python python\cover-timing.py 输入.wav 输出.wav 0 rmvpe
 
 ---
 
+## 换了估调引擎后音域判断变了
+
+`est_f0.py` 默认 `--engine=auto`：先试 rmvpe（与 `cover.py` 转换阶段同一条 f0 曲线），探测不到就退回 pyin。两套算法对同一段人声的中位数可能差一点点，于是 `pitch` 可能差一个半音 —— 这是引擎差异，不是 bug。
+
+怎么核对：
+
+- 看 `sing_cover` 返回里的 `sourceF0Engine`（`rmvpe` / `pyin` / `null`）与 `sourceMedianF0`，先确认这次到底用了哪套；
+- 想直接对比：`SING_F0_ENGINE=pyin` 跑一次、`=rmvpe` 再跑一次，只看 `sourceMedianF0` 与 `pitch` 是否跳档；
+- rmvpe 为什么不可用：`est_f0.py` 的 stdout 会带 `REASON=`，MCP 的 stderr 里也会打一行 `[mcp-sing] est_f0 engine=...`；
+- 找不到入口说明你那份 `rvc_cli` 布局不在已知的几种里（`rvc_cli.rvc.infer.lib.rmvpe` / `rvc_cli.rvc.lib.rmvpe` / `infer.lib.rmvpe`），这时用 pyin 或把入口加进 `RMVPE_ENTRY_CANDIDATES`。
+
 ## 前奏听着「卡住 / 没声音」、整体比原曲小
 
 **原因**：ffmpeg 的 `amix` 默认 `normalize=1`，会把两路混合结果除以输入路数（≈ −6 dB），再叠加老 ffmpeg 不认 `normalize=0` 参数，最终成品比源低约 10 dB。

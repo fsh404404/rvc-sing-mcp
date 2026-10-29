@@ -1,6 +1,10 @@
 # 依赖
 node_modules/
 
+# Python 字节码（python/ 下的脚本被调用时会生成）
+__pycache__/
+*.pyc
+
 # 本地配置（含机器相关路径，不入库；用 config.example.json 复制一份）
 config.json
 

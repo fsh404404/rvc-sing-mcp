@@ -30,6 +30,10 @@ const DEFAULTS = {
   femaleF0Threshold: 200,
   // 自动定调上限（半音）
   maxPitch: 12,
+  // 估调用的 f0 引擎：auto（有 rmvpe 就用，否则 pyin）/ rmvpe / pyin
+  f0Engine: 'auto',
+  // 估调最多取多少秒（原来的行为是 40 秒）
+  f0MaxSeconds: 40,
   // 按歌名记住起唱点的规则文件，相对 <singDir>/
   startOffsetsFile: 'start-offsets.json',
   // 仅用于结果提示文案，改成你机器人框架里发语音的工具名
@@ -147,6 +151,8 @@ export function loadConfig() {
     targetF0: num('targetF0', 'SING_TARGET_F0'),
     femaleF0Threshold: num('femaleF0Threshold', 'SING_FEMALE_F0'),
     maxPitch: Math.trunc(num('maxPitch', 'SING_MAX_PITCH')),
+    f0Engine: String(pick('f0Engine', 'SING_F0_ENGINE', raw)).toLowerCase(),
+    f0MaxSeconds: num('f0MaxSeconds', 'SING_F0_MAX_SECONDS'),
     startOffsetsFile: absUnder(singDir, pick('startOffsetsFile', 'SING_START_OFFSETS', raw)),
     voiceToolName: String(pick('voiceToolName', 'SING_VOICE_TOOL', raw)),
     // 并发与磁盘：7x24 跑在机器人里时，这两项决定「会不会把显存和磁盘跑爆」

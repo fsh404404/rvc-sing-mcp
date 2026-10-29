@@ -44,6 +44,8 @@ const DEFAULT_SECONDS = Math.min(CFG.defaultSeconds, MAX_SECONDS);
 const TARGET_F0 = CFG.targetF0;
 const FEMALE_F0 = CFG.femaleF0Threshold;
 const MAX_PITCH = CFG.maxPitch;
+const F0_ENGINE = CFG.f0Engine;
+const F0_MAX_SECONDS = CFG.f0MaxSeconds;
 const VOICE_TOOL = CFG.voiceToolName;
 const MAX_CONCURRENT = CFG.maxConcurrent;
 const KEEP_WORK = CFG.keepWork;
@@ -316,14 +318,22 @@ async function convertVoice(inputWav, outWav, pitch = 0) {
 }
 
 /** 估原唱人声的中位基频（Hz）：>=200 视为女声区，<165 视为男声区。
- *  升调只能由「原唱音域低于目标音色」触发，不能凭感觉乱加——加错了会顶到破音区。 */
+ *  升调只能由「原唱音域低于目标音色」触发，不能凭感觉乱加——加错了会顶到破音区。
+ *  引擎可选：auto 优先用 rmvpe（与 cover.py 转换阶段同一条 f0 曲线，也更快），
+ *  探测不到就由 est_f0.py 内部退回 pyin；返回里带上是哪套算的，便于对比排查。 */
 async function estimateMedianF0(wav) {
   try {
     if (!fs.existsSync(F0_SCRIPT)) return null;
-    const out = await run(VENV_PY, [F0_SCRIPT, wav], { timeout: 180_000 });
-    const m = /MEDIAN_F0=([\d.]+)/.exec(String(out ?? ''));
+    const args = [F0_SCRIPT, wav];
+    if (F0_ENGINE) args.push(`--engine=${F0_ENGINE}`);
+    if (F0_MAX_SECONDS) args.push(`--max-seconds=${F0_MAX_SECONDS}`);
+    const out = String(await run(VENV_PY, args, { timeout: 180_000 }) ?? '');
+    const m = /MEDIAN_F0=([\d.]+)/.exec(out);
+    const e = /ENGINE=([A-Za-z0-9_]+)/.exec(out);
     const hz = m ? Number.parseFloat(m[1]) : 0;
-    return Number.isFinite(hz) && hz > 0 ? hz : null;
+    const engine = e ? e[1] : null;
+    if (engine) console.error(`[mcp-sing] est_f0 engine=${engine}${engine === 'none' ? ` (${/REASON=([^\n]+)/.exec(out)?.[1] ?? ''})` : ''}`);
+    return Number.isFinite(hz) && hz > 0 ? { hz, engine } : null;
   } catch {
     return null;
   }
@@ -680,8 +690,8 @@ server.tool(
       let usePitch = pitch ?? 0;
       let pitchNote = null;
       if (medianF0 != null) {
-        const hz = medianF0.toFixed(0);
-        if (medianF0 >= FEMALE_F0) {
+        const hz = medianF0.hz.toFixed(0);
+        if (medianF0.hz >= FEMALE_F0) {
           // 已经在女声区：原调就是目标音色的音域，任何升调都只会破音
           if (usePitch !== 0) {
             pitchNote = `原唱人声中位 ${hz}Hz 已高于 ${FEMALE_F0}Hz，把 pitch=${usePitch} 归 0`;
@@ -690,7 +700,7 @@ server.tool(
         } else {
           // 目标音域法：把源中位 f0 搬到 TARGET_F0 附近。
           // 实测机械八度（+12）会顶到假声、丢帧率最高；搬到舒适区中心才是自然档。
-          const sug = Math.max(0, Math.min(MAX_PITCH, Math.round(12 * Math.log2(TARGET_F0 / medianF0))));
+          const sug = Math.max(0, Math.min(MAX_PITCH, Math.round(12 * Math.log2(TARGET_F0 / medianF0.hz))));
           if (usePitch !== sug) {
             pitchNote = `原唱人声中位 ${hz}Hz 低于目标音色音域，按目标 ${TARGET_F0}Hz 自动定调 pitch=${sug}` +
               (pitch !== undefined ? `（你填的 ${pitch} 已校正）` : '');
@@ -715,7 +725,8 @@ server.tool(
         sourceDurationSeconds: total,
         mode: 'ai',
         pitch: usePitch,
-        sourceMedianF0: medianF0 == null ? null : Math.round(medianF0),
+        sourceMedianF0: medianF0 == null ? null : Math.round(medianF0.hz),
+        sourceF0Engine: medianF0?.engine ?? null,
         pitchNote,
         bytes: fs.statSync(outFile).size,
         next: `用 ${VOICE_TOOL} 传 "${path.basename(outFile)}" 发出去`,
